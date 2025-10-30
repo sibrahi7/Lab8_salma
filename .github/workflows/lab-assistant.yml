@@ -1,0 +1,294 @@
+name: Lab Reviewer
+
+on: [pull_request]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      story_passed: ${{ steps.test_story.outcome == 'success' }}
+      prompt_bold_passed: ${{ steps.test_bold_prompt.outcome == 'success' }}
+      exit_message_passed: ${{ steps.test_exit_message.outcome == 'success' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Poetry Action
+        uses: snok/install-poetry@v1.4.1
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run test_story
+        id: test_story
+        run: poetry run pytest tests/test_story.py -v
+        continue-on-error: true
+
+      - name: Check 1
+        id: test_bold_prompt
+        run: poetry run pytest tests/test_bold_prompt.py -v
+        continue-on-error: true
+
+      - name: Check 2
+        id: test_exit_message
+        run: poetry run pytest tests/test_exit_message.py -v
+        continue-on-error: true
+
+      - name: Export results
+        run: |
+          echo "STORY_PASSED=${{ steps.test_story.outcome == 'success' }}" >> $GITHUB_ENV
+          echo "PROMPT_BOLD_PASSED=${{ steps.test_bold_prompt.outcome == 'success' }}" >> $GITHUB_ENV
+          echo "EXIT_MESSAGE_PASSED=${{ steps.test_exit_message.outcome == 'success' }}" >> $GITHUB_ENV
+
+  test_failed:
+    needs: test
+    if: needs.test.outputs.story_passed == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: test_story failed
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ❌ test_story.py failed
+            Please update your code to ensure test_story.py passes under your branch
+            Run:
+            ```bash
+            poetry run pytest tests/test_story.py -v
+            ```
+            to check the details.
+
+  suggestion:
+    needs: test
+    if: needs.test.outputs.story_passed == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      approve: ${{ steps.check_approval.outputs.approve }}
+    steps:
+      - name: decision?
+        id: find_decision
+        uses: peter-evans/find-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-includes: "<!--DECISION:"
+          direction: last
+      - name: find decision
+        run: |
+          if echo "${{ steps.find_decision.outputs.comment-body }}" | grep -q "<!--DECISION: resolved-->"; then
+            echo "RESOLVED=true" >> $GITHUB_ENV
+          else
+            echo "RESOLVED=false" >> $GITHUB_ENV
+          fi
+
+      - name: suggestion?
+        uses: peter-evans/find-comment@v4
+        id: find_suggestion
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-includes: "<!--SUGGESTION:"
+          direction: last
+      - name: find comment
+        run: |
+          if echo "${{ steps.find_suggestion.outputs.comment-body }}" | grep -q "<!--SUGGESTION: bold-->"; then
+            echo "TYPE=bold" >> $GITHUB_ENV
+          elif echo "${{ steps.find_suggestion.outputs.comment-body }}" | grep -q "<!--SUGGESTION: exit-->"; then
+            echo "TYPE=exit" >> $GITHUB_ENV
+          else
+            echo "TYPE=none" >> $GITHUB_ENV
+          fi
+
+      - name: check approval
+        id: check_approval
+        run: |
+          if [[ "$TYPE" == "bold" && "${{ needs.test.outputs.prompt_bold_passed }}" == "true" && "$RESOLVED" == "true" ]]; then
+            echo "approve=success" >> "$GITHUB_OUTPUT"
+          elif [[ "$TYPE" == "exit" && "${{ needs.test.outputs.exit_message_passed }}" == "true" && "$RESOLVED" == "true" ]]; then
+            echo "approve=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "approve=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: follow-up check bold
+        if: env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'false'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ✅ test_story.py passed
+            ❌ test_bold_prompt.py failed
+            Please update your code to make sure the prmopt "Which direction do you choose?" is in bold. If you think this auto-test has incorrect results, please reach out to the instructor to manually check your code.
+            <!--SUGGESTION: bold-->
+
+      - name: follow-up check exit
+        if: env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'false'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ✅ test_story.py passed
+            ❌ test_exit_message.py failed
+            Please update your code to make sure some goodbye message is printed after the user enters exit. If you think this auto-test has incorrect results, please reach out to the instructor to manually check your code.
+            <!--SUGGESTION: exit-->
+
+      - name: bot mate checkout
+        if: env.RESOLVED == 'false' && ( (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') || (env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true') )
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: main
+          fetch-depth: 0
+
+      - name: commit to main
+        if: env.RESOLVED == 'false' && ( (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') || (env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true') )
+        run: |
+          git config user.name "bot mate"
+          git config user.email "botmate@users.noreply.github.com"
+          wget https://gist.githubusercontent.com/sjiang1/e0bd67f05e831984686830a5e5114f97/raw/43b52894686b04f42c35d571baa23d268c3c776a/story.py
+          cp story.py src/adventure/story.py
+          git add src/adventure/story.py
+          git commit -m "The bot mate refactored story.py!"
+          git push origin main
+
+      - name: follow-up check bold - success
+        if: env.RESOLVED == 'false' && env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ✅ test_story.py passed
+            ✅ test_bold_prompt.py passed
+            🥳 Congratulations! All tests passed!
+
+            Oh, wait! 😼 There's a new commit in main branch, please update your branch to keep up to date with the main branch.
+            <!--DECISION: resolved-->
+
+      - name: follow-up check exit - success
+        if: env.RESOLVED == 'false' && env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ✅ test_story.py passed
+            ✅ test_exit_message.py passed
+            🥳 Congratulations! All tests passed!
+
+            Oh, wait! 😼 There's a new commit in main branch, please update your branch to keep up to date with the main branch.
+            <!--DECISION: resolved-->
+
+      - name: last check
+        if: env.RESOLVED == 'true' && ( ( env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true' ) || (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') )
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.head_ref }}
+          
+      - name: fetch main
+        if: env.RESOLVED == 'true' && ( ( env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true' ) || (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') )
+        run: git fetch origin main
+
+      - name: working branch up-to-date?
+        if: env.RESOLVED == 'true' && ( ( env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true' ) || (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') )
+        id: check_sync
+        run: |
+          BEHIND_COUNT=$(git rev-list --count HEAD..origin/main)
+          echo "behind_count=$BEHIND_COUNT" >> $GITHUB_OUTPUT
+          
+      - name: end of Lab
+        if: env.RESOLVED == 'true' && ( ( env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true' ) || (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') ) && steps.check_sync.outputs.behind_count == '0'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            Everything seems all right now! Your branch is up to date with the main. I'll approve the PR (pull request) right now.
+
+            Once it's merged, delete the branch! 👇👇👇
+        
+      - name: keep updating
+        if: env.RESOLVED == 'true' && ( ( env.TYPE == 'exit' && needs.test.outputs.exit_message_passed == 'true' ) || (env.TYPE == 'bold' && needs.test.outputs.prompt_bold_passed == 'true') ) && steps.check_sync.outputs.behind_count != '0'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ⚠️ The **main** branch has new commits that your branch doesn't have.  
+            Please merge or rebase **main** into your branch to stay up to date.
+            
+      - name: think
+        if: env.TYPE == 'none'
+        id: choose
+        run: |
+          RAND=$((RANDOM % 2))
+          echo "choice=$RAND" >> $GITHUB_OUTPUT
+
+      - name: free suggestion
+        if: env.TYPE == 'none' && needs.test.outputs.prompt_bold_passed == 'false' && needs.test.outputs.exit_message_passed == 'false'
+        run: |
+          if [ "${{ steps.choose.outputs.choice }}" == "0" ]; then
+            echo "COMMENT=bold" >> $GITHUB_ENV
+          else
+            echo "COMMENT=exit" >> $GITHUB_ENV
+          fi
+
+      - name: choose 1
+        if: env.TYPE == 'none' && needs.test.outputs.prompt_bold_passed == 'false' &&  needs.test.outputs.exit_message_passed == 'true'
+        run: echo "COMMENT=bold" >> $GITHUB_ENV
+
+      - name: choose 2
+        if: env.TYPE == 'none' && needs.test.outputs.prompt_bold_passed == 'true' &&  needs.test.outputs.exit_message_passed == 'false'
+        run: echo "COMMENT=exit" >> $GITHUB_ENV
+
+      - name: post suggestion
+        if: env.TYPE == 'none'
+        uses: mshick/add-pr-comment@v2.8.2
+        with:
+          allow-repeats: true
+          refresh-message-position: true
+          message: |
+            ✅ test_story.py passed
+            ${{ env.COMMENT == 'bold' && 'Great work! But I would like to see "Which direction do you choose?" in bold, can you adjust your code to do that?' || 'Great work! But I would like to see a goodbye message after user enters `exit`, can you adjust your code to do that?' }}
+            ${{ env.COMMENT == 'bold' && '<!--SUGGESTION: bold-->' || '<!--SUGGESTION: exit-->' }}
+          
+  auto_merge:
+    needs: [suggestion]
+    if: needs.suggestion.outputs.approve == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: bot reviewer checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Approve Pull Request
+        uses: juliangruber/approve-pull-request-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.pull_request.number }}
+
+      - name: merge
+        uses: juliangruber/merge-pull-request-action@v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          number: ${{ github.event.pull_request.number }}
+          method: squash
+
+      - name: confirm merge
+        run: echo "✅ Pull request approved and merged"
