@@ -5,6 +5,7 @@ import sys
 import random
 from typing import List
 
+
 from adventure.utils import read_events_from_file
 from rich.console import Console
 from rich.theme import Theme
@@ -19,6 +20,12 @@ def _colors_disabled_for_tests() -> bool:
     running_pytest = os.getenv("PYTEST_CURRENT_TEST") is not None
     not_a_tty = not sys.stdout.isatty()
     return running_pytest or not_a_tty
+
+default_message = "You stand still, unsure what to do. The forest swallows you."
+
+def step(choice: str, events):
+    random_event = random.choice(events)
+
 
 
 # Define a consistent theme for the story text
@@ -48,7 +55,7 @@ def step(choice: str, events: List[str]) -> str:
     elif choice == "right":
         return right_path(random_event)
     else:
-        return "You stand still, unsure what to do. The forest swallows you."
+        return default_message
 
 
 def left_path(event: str) -> str:
